@@ -82,6 +82,18 @@ ezvals run evals/
 # Creates: .ezvals/runs/swift-falcon_2024-01-15T10-30-00Z.json
 ```
 
+### Rename an Existing Saved Run
+
+Use run-id based rename mode when you want to update a run name from scripts or terminal workflows.
+
+```bash
+# Rename by run_id
+ezvals run --rename run123 better-name
+
+# Restrict lookup to one session
+ezvals run --rename run123 better-name --session model-comparison
+```
+
 ## Running Evals
 
 ### Basic Run
@@ -95,6 +107,12 @@ ezvals run evals/customer_service.py
 
 # Run a specific function
 ezvals run evals/customer_service.py::test_refund
+
+# Run a specific list of evals (no label hacks)
+ezvals run evals/customer_service.py::test_refund,test_escalation
+
+# Run specific case IDs with intuitive selectors
+ezvals run evals/customer_service.py::test_math@low,test_math@high
 ```
 
 ### Filtering
@@ -122,8 +140,8 @@ ezvals run evals/ --timeout 60.0
 # Show verbose output
 ezvals run evals/ --verbose
 
-# Rich visual output with progress table
-ezvals run evals/ --visual
+# Save to a custom path
+ezvals run evals/ --output results.json
 ```
 
 ### Output Options
@@ -136,6 +154,34 @@ ezvals run evals/ --output results.json
 ezvals run evals/ --no-save
 ```
 
+## Temporary Ad-Hoc Runs (No Saved Files)
+
+When you want a quick one-off eval (for example, testing an idea in a temp script) and do **not** want to persist run files, use the SDK `run(...)` with `no_save=True`.
+
+```python
+from ezvals import eval, EvalResult, run
+
+
+@eval()
+def test_temp_behavior():
+    return EvalResult(
+        input="hello",
+        output="hello",
+        scores={"key": "pass", "passed": True},
+    )
+
+
+if __name__ == "__main__":
+    result = run(
+        path=__file__,   # run evals defined in this temp script
+        no_save=True,    # do not write a run JSON file
+        verbose=True,
+    )
+    print(result["summary"]["total_evaluations"])
+```
+
+Use this pattern for scratch experiments, fast local checks, and agent-generated temp eval files.
+
 ## Serving Results for Review
 
 After running evals, serve them for the user to review in the browser.
@@ -147,7 +193,7 @@ After running evals, serve them for the user to review in the browser.
 ezvals serve evals/ --session my-experiment
 ```
 
-This opens `http://localhost:8000` where the user can:
+This opens `http://localhost:8000` by default (use `--no-open` to skip auto-opening a browser) where the user can:
 - View all eval results in a table
 - Click into individual results for details
 - Filter by dataset, label, or status
@@ -164,6 +210,11 @@ ezvals serve evals/ --session my-experiment --run
 
 The `--run` flag automatically runs all evals when the server starts.
 
+```bash
+# Start server without opening browser
+ezvals serve evals/ --session my-experiment --no-open
+```
+
 ## Sharing Focused Views by URL
 
 If the user already has the UI running, or if you want to show the user a specific view, construct and share a direct URL for exactly what you want them to review.
@@ -176,8 +227,8 @@ Use the user’s existing serve URL, e.g.:
 
 ### Query Parameters
 
-- `run_id=<id>` active run to open
-- `compare_run_id=<id>` repeat to compare multiple runs
+- `run_id=<id>` active run to open for single-run views
+- `compare_run_id=<id>` repeat to compare multiple runs (preferred for compare mode links)
 - `search=<text>` search query
 - `annotation=any|yes|no`
 - `has_error=1|0`
@@ -194,7 +245,7 @@ Use the user’s existing serve URL, e.g.:
 
 ```text
 You can see the two final runs side-by-side here:
-http://127.0.0.1:8000/?run_id=1826bc4c&compare_run_id=1826bc4c&compare_run_id=58741756
+http://127.0.0.1:8000/?compare_run_id=1826bc4c&compare_run_id=58741756
 ```
 
 ```text
@@ -203,8 +254,8 @@ http://127.0.0.1:8000/?run_id=1826bc4c&has_error=1
 ```
 
 ```text
-You can see passing correctness-only results for QA labels here:
-http://127.0.0.1:8000/?run_id=1826bc4c&score_passed=correctness,true&label_in=qa
+You can see passing pass-only results for QA labels here:
+http://127.0.0.1:8000/?run_id=1826bc4c&score_passed=pass,true&label_in=qa
 ```
 
 ### Loading Previous Results
@@ -247,6 +298,128 @@ Results are saved to `.ezvals/runs/` with the pattern `{run_name}_{timestamp}.js
   "total_errors": 2,
   "results": [...]
 }
+```
+
+### `results[*]` / `EvalResult` Output Schema
+
+Each item in `results` has run metadata plus a `result` object that matches `EvalResult`:
+
+```json
+{
+  "function": "test_answer_quality",
+  "dataset": "customer-service",
+  "labels": ["prod", "regression"],
+  "result": {
+    "input": "User asks for refund policy",
+    "output": "You can request a refund within 30 days.",
+    "reference": "Refunds are allowed within 30 days",
+    "scores": [
+      {"key": "pass", "passed": true, "value": 1.0, "notes": null},
+      {"key": "tone", "passed": true, "value": 0.9, "notes": "Professional"}
+    ],
+    "error": null,
+    "latency": 0.42,
+    "metadata": {"model": "gpt-4o-mini"},
+    "trace_data": {"trace_url": "https://trace.example/run/123"}
+  }
+}
+```
+
+`result` field reference:
+
+- `input` (`Any`) input used for evaluation
+- `output` (`Any`) target/agent output
+- `reference` (`Any | null`) expected output (if provided)
+- `scores` (`Score[] | null`) list of score objects
+- `error` (`string | null`) execution error, if one occurred
+- `latency` (`number | null`) seconds for this eval
+- `metadata` (`object | null`) user-defined structured metadata
+- `trace_data` (`object | null`) trace payload (often `messages`, `trace_url`, and extras)
+- `correction_history` (`list | null`) append-only manual edit history for score/note edits (`field`, `before`, `after`, `timestamp`)
+
+`Score` shape:
+
+- `key` (`string`) score name
+- `value` (`number | null`) numeric score (optional)
+- `passed` (`bool | null`) pass/fail flag (optional)
+- `notes` (`string | null`) extra context
+
+At least one of `value` or `passed` is always present on each score.
+
+### Parsing Recipes (Python)
+
+```python
+import json
+
+with open(".ezvals/runs/latest.json") as f:
+    run = json.load(f)
+
+results = run["results"]
+```
+
+Find failing evals (has any `passed == False`):
+
+```python
+failing = [
+    row for row in results
+    if any(score.get("passed") is False for score in (row["result"].get("scores") or []))
+]
+```
+
+Find execution errors (`result.error` present):
+
+```python
+errors = [row for row in results if row["result"].get("error")]
+```
+
+Filter by error text:
+
+```python
+timeout_errors = [
+    row for row in results
+    if "timeout" in (row["result"].get("error") or "").lower()
+]
+```
+
+Extract one score key across results:
+
+```python
+def score_for(row, key):
+    for score in (row["result"].get("scores") or []):
+        if score["key"] == key:
+            return score
+    return None
+
+pass_values = [
+    (row["function"], score_for(row, "pass"))
+    for row in results
+]
+```
+
+Average numeric score for a key:
+
+```python
+vals = []
+for row in results:
+    score = score_for(row, "pass")
+    if score and score.get("value") is not None:
+        vals.append(score["value"])
+
+avg_pass = (sum(vals) / len(vals)) if vals else None
+```
+
+Find rows with manual corrections:
+
+```python
+corrected = [row for row in results if row["result"].get("correction_history")]
+```
+
+Inspect the latest correction per row:
+
+```python
+for row in corrected:
+    latest = row["result"]["correction_history"][-1]
+    print(row["function"], latest["field"], latest["before"], "->", latest["after"])
 ```
 
 ## Workflow: Agent Runs, User Reviews
@@ -302,7 +475,7 @@ ezvals export .ezvals/runs/baseline.json -f csv -o results.csv
 
 ### From Web UI
 
-Click the download icon in the header to export:
+Open the overflow (three-dot) menu in the header, then hover **Download** to export:
 - **JSON**: Raw results file
 - **CSV**: Flat format for spreadsheets
 - **Markdown**: ASCII charts + table (respects current filters)
@@ -327,5 +500,5 @@ CLI flags always override config values.
 2. **Use descriptive run names** - You'll thank yourself later
 3. **Serve results for user review** - Don't just dump JSON
 4. **Run with concurrency** - `--concurrency 4` speeds up large suites
-5. **Use `--visual` during development** - Easier to see what's happening
+5. **Use `--verbose` during development** - Surface eval stdout/logging quickly
 6. **Commit the session name** - Include it in PR descriptions for traceability

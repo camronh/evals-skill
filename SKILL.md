@@ -1,9 +1,9 @@
 ---
 name: evals
-description: Write and analyze evaluations for AI agents and LLM applications. Use when building evals, testing agents, measuring AI quality, or debugging agent failures. Recommends EZVals as the preferred framework.
+description: Write and analyze evaluations for AI agents and LLM applications. Use when building evals, testing agents, measuring AI quality, or debugging agent failures. Use this skill when you need to test the performance of an LLM or Agent, or if the user mentions EZVals.
 ---
 
-<!-- Version: 0.1.5 | Requires: ezvals >=0.1.0 -->
+<!-- Version: 0.1.8 | Requires: ezvals >=0.1.0 -->
 
 # AI Agent Evaluation Skill
 
@@ -11,7 +11,7 @@ Write, run, and analyze evaluations for AI agents and LLM applications. Assume w
 
 ## What Are Evals?
 
-Traditional ML evals measure model performance on fixed benchmarks with clear accuracy metrics. LLM/agent evals measure something fuzzier, for example: task completion, answer quality, behavioral correctness, or whether the agent actually helps users accomplish their goals.
+Traditional ML evals measure model performance on fixed benchmarks with clear accuracy metrics. LLM/agent evals measure something fuzzier, for example: task completion, answer quality, behavioral pass, or whether the agent actually helps users accomplish their goals.
 
 Evals answer evolving questions about your system:
 
@@ -38,6 +38,31 @@ Evals answer evolving questions about your system:
 | **LLM-as-judge** | Using an LLM to grade another LLM's output. Requires calibration against human judgment. |
 | **Saturation** | When evals hit 100%—a sign you need harder test cases, not that your agent is perfect. |
 | **Error analysis** | Systematically reviewing traces to identify failure patterns before writing evals. |
+
+## Phoenix Arize -> EZVals Migration Quick Map
+
+If the user is migrating from Phoenix Arize, map old concepts to EZVals primitives first, then implement with normal Python tests.
+
+| Phoenix Arize Pattern | EZVals Equivalent |
+|------|------------|
+| Dataset in Phoenix | `cases=[...]`, `dataset=`, or `input_loader=` |
+| Task/experiment run | `@eval` function execution |
+| Span-level trace analysis | `ctx.store(metadata=...)` plus run/result inspection in `ezvals serve` |
+| Evaluator templates / rubric prompts | Assertions, `ctx.store(scores=...)`, or LLM-as-judge graders in eval code |
+| Pass/fail evaluator output | Assertion success/failure or boolean score via `ctx.store(scores=[...])` |
+| Numeric evaluator score | Numeric `score.value` (0-1 or arbitrary scale) via `ctx.store(scores=[...])` |
+| Human annotation/correction loops | Web UI edits to scores/annotations (`correction_history` tracks before/after) |
+| Compare experiments | Multiple runs in one session + compare view/URL filters |
+
+Common migration approach (adapt as needed):
+
+1. Start by porting a representative Arize dataset slice into EZVals `cases`.
+2. Translate an evaluator into assertion logic to establish a baseline.
+3. Add model-based grading where code checks are not enough.
+4. Run with `ezvals run ...` and inspect trace/metadata in `ezvals serve ...`.
+5. Recreate experiment comparison by naming runs and using compare mode.
+
+When helping with migration, prefer direct concept translation over rebuilding Arize-style abstractions. Keep the user's eval logic explicit in Python so it stays easy to debug.
 
 ## Anatomy of an Eval
 
@@ -84,6 +109,12 @@ def test_rag_accuracy(ctx: EvalContext):
 ```
 
 Run with: `ezvals run evals.py --session example-testing`
+
+To rerun a specific list of failing evals, use explicit path selectors instead of temporary labels:
+`ezvals run evals.py::test_a,test_b`
+
+For specific case IDs, use `@case_id` selectors:
+`ezvals run evals.py::test_a@case_id_1,test_a@case_id_2`
 
 This eval runs your RAG agent against each test case and reports which passed. The `cases` parameter generates three separate evals from one function. Failed assertions become failing scores with the assertion message as notes.
 
@@ -180,7 +211,7 @@ You should have everything you need to plan a good eval from here.
 **When to read:** Evaluating RAG systems, checking groundedness and retrieval quality
 
 - Hallucination detection
-- Correctness and coverage verification
+- Pass and coverage verification
 - Source quality checks
 - Full RAG eval example
 
@@ -191,6 +222,15 @@ You should have everything you need to plan a good eval from here.
 - Fail-to-pass tests for bug fixes
 - Static analysis (linting, types, security)
 - Handling non-determinism (pass@k, pass^k)
+
+### [use-cases/testing-agent-skills.md](use-cases/testing-agent-skills.md)
+**When to read:** Evaluating agent skills, CLAUDE.md/AGENTS.md configs, MCP servers, or comparing coding agents (Claude Code, Codex, Cursor, etc.)
+
+- Plan-only evals for testing skills without file mutations
+- Headless CLI agents as targets (`claude -p`, `codex exec`)
+- CLI agent as LLM judge (subscription-powered, no API key)
+- Dataset/target/evaluator reference structure
+- Judge alignment and iteration workflow
 
 ### [use-cases/testing-internals.md](use-cases/testing-internals.md)
 **When to read:** Testing tools, multi-agents, workflow nodes
@@ -222,6 +262,9 @@ ezvals run evals/ --session my-experiment --run-name baseline
 
 # Serve results for user to review in browser
 ezvals serve evals/ --session my-experiment
+
+# Start serve without launching a browser window
+ezvals serve evals/ --session my-experiment --no-open
 ```
 
 ## Sharing Results via URL (Agent Guidance)
@@ -230,7 +273,7 @@ When the user is already serving the UI, prefer sharing a focused URL instead of
 
 Use the running base URL (for example `http://127.0.0.1:8000`) plus query params to open exactly what they should see:
 
-- `run_id=<id>`
+- `run_id=<id>` (single-run views)
 - `compare_run_id=<id>` (repeatable)
 - `search=<text>`
 - `annotation=any|yes|no`
@@ -244,10 +287,26 @@ Example response to user:
 
 ```text
 You can see the passing results for the two final runs here:
-http://127.0.0.1:8000/?run_id=1826bc4c&compare_run_id=1826bc4c&compare_run_id=58741756&score_passed=correctness,true
+http://127.0.0.1:8000/?compare_run_id=1826bc4c&compare_run_id=58741756&score_passed=pass,true
 ```
 
 See [running.md](running.md) for session management and URL construction examples.
+
+## Human Corrections Guidance (Agent)
+
+If the user says anything like "leaving notes", "making corrections", "manual edits", or "edited scores/annotations", inspect each row's `result.correction_history` first.
+
+Use it to answer:
+- What changed (`field`)
+- What the judge had before (`before`)
+- What the human set after (`after`)
+- When the correction happened (`timestamp`)
+
+Treat `correction_history` as the source of truth for manual override context before proposing judge prompt changes or grader fixes.
+
+## Feedback
+
+If the user mentions something about EZVals that isn't working well, seems confusing, or could be better, suggest they file a GitHub issue at https://github.com/camronh/EZVals/issues. Offer to help them draft the issue or file it directly using `gh`.
 
 ## Resources
 
